@@ -1,7 +1,7 @@
 # app.py
 import re
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Set
 
 import pandas as pd
 import streamlit as st
@@ -23,15 +23,24 @@ REQ_COLS = [
     "source","confidence",
 ]
 
+TOP_RANKING_BASENAME = "top_123_companies_list_DECADE_and_LAST"  # we'll try .xlsx/.xls/.csv
+
 # ---------------- Helpers ----------------
 def format_cnpj(raw: str) -> str:
     """Format a 14-digit CNPJ as 00.000.000/0000-00."""
     if not isinstance(raw, str):
         return ""
-    s = re.sub(r"\D", "", raw).zfill(14)
+    s = re.sub(r"\D", "", raw).zfill(14)[-14:]
     if len(s) != 14:
         return raw or ""
     return f"{s[0:2]}.{s[2:5]}.{s[5:8]}/{s[8:12]}-{s[12:14]}"
+
+def normalize_cnpj_digits(raw: str) -> str:
+    """Normalize to 14-digit only-digits string (left-padded) using the last 14 digits if longer."""
+    s = re.sub(r"\D", "", str(raw or ""))
+    if not s:
+        return ""
+    return s[-14:].zfill(14)
 
 _SPLIT_RE = re.compile(r"[,\|;]+")
 
@@ -83,45 +92,89 @@ def load_csv() -> pd.DataFrame:
     # Normalize conveniences
     df = df.copy()
     df["CNPJ_fmt"] = df["cnpj"].map(format_cnpj)
+    df["cnpj_norm"] = df["cnpj"].map(normalize_cnpj_digits)
     df["__sec_code_list__"] = df["cnae_secundarios_norm"].map(split_list)
     df["__sec_desc_list__"] = df.apply(split_sec_descriptions, axis=1)
 
     return df
 
-def common_text_filters(df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
-    st.subheader("🔎 Search")
-    c1, c2 = st.columns([2,1])
-    with c1:
-        name_q = st.text_input("Company name contains", value="", key=f"{key_prefix}_name").strip()
-    with c2:
-        cnpj_q = st.text_input("CNPJ digits contain", value="", key=f"{key_prefix}_cnpj").strip()
+@st.cache_data(show_spinner=False)
+def load_top_ranking_set() -> Set[str]:
+    """
+    Try to load the TOP ranking file from the working directory.
+    Accepts .xlsx, .xls, .csv. Detects the first column whose name contains 'cnpj' (case-insensitive).
+    Returns a set of normalized CNPJs (14-digit strings).
+    """
+    candidates = [
+        Path(f"{TOP_RANKING_BASENAME}.xlsx"),
+        Path(f"{TOP_RANKING_BASENAME}.xls"),
+        Path(f"{TOP_RANKING_BASENAME}.csv"),
+    ]
+    path: Optional[Path] = next((p for p in candidates if p.exists()), None)
+    if path is None:
+        return set()
 
+    if path.suffix.lower() in [".xlsx", ".xls"]:
+        tdf = pd.read_excel(path, dtype="string")
+    else:
+        tdf = pd.read_csv(path, dtype="string")
+
+    # find CNPJ-like column
+    cnpj_cols = [c for c in tdf.columns if "cnpj" in c.lower()]
+    if not cnpj_cols:
+        return set()
+
+    col = cnpj_cols[0]
+    return set(tdf[col].map(normalize_cnpj_digits).dropna().tolist())
+
+def add_top_flag(df: pd.DataFrame, top_set: Set[str]) -> pd.DataFrame:
+    df = df.copy()
+    df["__IN_TOP__"] = df["cnpj_norm"].map(lambda x: x in top_set if isinstance(x, str) else False)
+    return df
+
+def company_search(df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
+    st.subheader("🔎 Search")
+    name_q = st.text_input("Company name contains", value="", key=f"{key_prefix}_name").strip()
     out = df
     if name_q:
         out = out[out["input_company"].fillna("").str.contains(name_q, case=False, na=False)]
-    if cnpj_q:
-        digits = re.sub(r"\D", "", cnpj_q)
-        if digits:
-            out = out[out["cnpj"].fillna("").str.contains(digits, na=False)]
     return out
 
-def unified_results_table(df_filtered: pd.DataFrame, *, widget_key: str):
-    # Show both systems together + company & CNPJ (highlight primary & secondary descriptions earlier)
-    cols = [
-        "input_company","CNPJ_fmt","cnpj",
-        "cnae_descricao",  # highlight primary description early
-        "cnae_secundarios_descricao",  # highlight secondary description early
+def style_top_rows(view: pd.DataFrame):
+    """Highlight rows where TOP RANKING == 'TOP' with light green background."""
+    def _row_style(row: pd.Series):
+        color = "background-color: #eaffea" if row.get("TOP RANKING", "") == "TOP" else ""
+        return [color] * len(row)
+    return view.style.apply(_row_style, axis=1)
+
+def unified_results_table(df_filtered: pd.DataFrame, total_count: int, *, widget_key: str):
+    """
+    Build the final results view:
+    - Add TOP RANKING and # columns at the left
+    - Emphasize primary & secondary descriptions early
+    - Remove 'cnpj' raw column
+    - Show count "Empresas: X/Y"
+    - Color TOP rows green
+    """
+    # Prepare label columns
+    top_label = df_filtered["__IN_TOP__"].map(lambda b: "TOP" if bool(b) else "")
+    idx_col = pd.Series(range(1, len(df_filtered) + 1), index=df_filtered.index, dtype="int")
+
+    # Base view (order: TOP, #, Empresa, CNPJ_fmt, descriptions, rest)
+    cols_order = [
+        "input_company","CNPJ_fmt",
+        "cnae_descricao",  # primary description (important)
+        "cnae_secundarios_descricao",  # secondary description (important)
         "cnae_primario",
         "setor","subsetor","segmento",
         "cnae_secundarios_norm","cnae_secundarios_pairs",
         "setor_progest","subsetor_progest","segmento_progest",
         "cnae7","source","confidence",
     ]
-    present = [c for c in cols if c in df_filtered.columns]
+    present = [c for c in cols_order if c in df_filtered.columns]
     view = df_filtered[present].rename(columns={
         "input_company": "Empresa",
         "CNPJ_fmt": "CNPJ (formatado)",
-        "cnpj": "CNPJ (bruto)",
         "setor": "CNAE Setor",
         "subsetor": "CNAE Subsetor",
         "segmento": "CNAE Segmento",
@@ -137,9 +190,19 @@ def unified_results_table(df_filtered: pd.DataFrame, *, widget_key: str):
         "source": "Fonte",
         "confidence": "Confiança",
     })
-    st.caption(f"Showing **{len(view):,}** rows.")
-    st.dataframe(view, use_container_width=True, hide_index=True, key=f"df_{widget_key}")
 
+    # Insert left columns
+    view.insert(0, "#", idx_col)
+    view.insert(0, "TOP RANKING", top_label)
+
+    # KPI count
+    st.markdown(f"**Empresas: {len(view):,}/{total_count:,}**")
+
+    # Render with style (highlight TOP)
+    styled = style_top_rows(view)
+    st.dataframe(styled, use_container_width=True, key=f"df_{widget_key}")
+
+    # Download CSV (without styles)
     csv_bytes = view.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
         "Download filtered CSV",
@@ -150,7 +213,9 @@ def unified_results_table(df_filtered: pd.DataFrame, *, widget_key: str):
     )
 
 # ---------------- Data ----------------
-df = load_csv()
+df_raw = load_csv()
+top_set = load_top_ranking_set()
+df = add_top_flag(df_raw, top_set)
 
 # ---------------- Tabs ----------------
 tab_cnae, tab_prop = st.tabs(["🏷️ CNAE filters", "🏷️ JP filters (proprietary)"])
@@ -159,13 +224,11 @@ tab_cnae, tab_prop = st.tabs(["🏷️ CNAE filters", "🏷️ JP filters (propr
 with tab_cnae:
     st.subheader("Filter by CNAE")
 
-    # 1) Text search first so dropdown options reflect only matching companies
-    df_base = common_text_filters(df, key_prefix="cnae")
-
-    # Progressive filtering & dependent options (non-null only)
+    # Search first so options reflect current subset
+    df_base = company_search(df, key_prefix="cnae")
 
     # --- Emphasize descriptions first (most important) ---
-    c1, c2, c3 = st.columns([1.2, 1.2, 1])
+    c1, c2 = st.columns([1.2, 1.2])
     with c1:
         # Primary description
         opts_primary_desc = unique_non_null(df_base["cnae_descricao"])
@@ -180,7 +243,7 @@ with tab_cnae:
         df_step = df_step[df_step["cnae_descricao"].isin(sel_primary_desc)]
 
     with c2:
-        # Secondary description list options depend on primary-desc selection
+        # Secondary description options depend on primary selection
         all_sec_descs = sorted({d for row in df_step["__sec_desc_list__"] for d in (row or [])})
         sel_sec_desc = st.multiselect(
             "⭐ CNAE Secundário (descrição)",
@@ -204,80 +267,31 @@ with tab_cnae:
         else:
             df_step = df_step[df_step["__sec_desc_list__"].map(lambda L: set(sel_sec_desc).issubset(set(L)))]
 
-    with c3:
-        # Primary code options depend on previous selections
-        opts_primary_code = unique_non_null(df_step["cnae_primario"])
-        sel_cnae_code = st.multiselect(
-            "CNAE Primário (código)",
-            options=opts_primary_code,
-            default=[],
-        )
+    # CNAE Setor (dependent on previous filters)
+    opts_setor = unique_non_null(df_step["setor"])
+    sel_setor = st.multiselect("CNAE Setor", options=opts_setor, default=[])
 
-    if sel_cnae_code:
-        df_step = df_step[df_step["cnae_primario"].isin(sel_cnae_code)]
-
-    # --- Secondary codes (depend on prior selections) ---
-    c4, c5, c6 = st.columns([1, 1, 1])
-    with c4:
-        all_sec_codes = sorted({code for row in df_step["__sec_code_list__"] for code in (row or [])})
-        sel_sec_codes = st.multiselect(
-            "CNAE Secundários (códigos)",
-            options=all_sec_codes,
-            default=[],
-            help="Filters rows that match the selected secondary codes."
-        )
-    with c5:
-        sec_code_mode = st.radio(
-            "Secondary (cód.) match",
-            options=["ANY","ALL"],
-            index=0,
-            horizontal=True,
-            key="sec_code_mode",
-            help="ANY = at least one selected code appears. ALL = all must appear."
-        )
-    with c6:
-        # CNAE hierarchy fields depend on everything chosen so far
-        opts_setor = unique_non_null(df_step["setor"])
-        sel_setor = st.multiselect("CNAE Setor", options=opts_setor, default=[])
-
-    # Apply secondary codes filter
-    if sel_sec_codes:
-        if sec_code_mode == "ANY":
-            df_step = df_step[df_step["__sec_code_list__"].map(lambda L: bool(set(L) & set(sel_sec_codes)))]
-        else:
-            df_step = df_step[df_step["__sec_code_list__"].map(lambda L: set(sel_sec_codes).issubset(set(L)))]
-
-    # Further dependent options for subsetor/segmento after setor choice
     if sel_setor:
         df_step = df_step[df_step["setor"].isin(sel_setor)]
 
-    c7, c8 = st.columns([1, 1])
-    with c7:
-        opts_subsetor = unique_non_null(df_step["subsetor"])
-        sel_subsetor = st.multiselect("CNAE Subsetor", options=opts_subsetor, default=[])
-    if sel_subsetor:
-        df_step = df_step[df_step["subsetor"].isin(sel_subsetor)]
-
-    with c8:
-        opts_segmento = unique_non_null(df_step["segmento"])
-        sel_segmento = st.multiselect("CNAE Segmento", options=opts_segmento, default=[])
-    if sel_segmento:
-        df_step = df_step[df_step["segmento"].isin(sel_segmento)]
+    # Toggle: only TOP ranking companies
+    only_top = st.checkbox("Apenas empresas no ranking TOP", value=False, key="only_top_cnae")
+    if only_top:
+        df_step = df_step[df_step["__IN_TOP__"]]
 
     st.markdown("### Results (both namings shown)")
-    unified_results_table(df_step, widget_key="cnae")
+    unified_results_table(df_step, total_count=len(df), widget_key="cnae")
 
 # ====================== JP (PROPRIETARY) TAB ======================
 with tab_prop:
     st.subheader("JP filters (proprietary)")
 
-    # 1) Text search first so dropdown options reflect only matching companies
-    df_base = common_text_filters(df, key_prefix="prop")
+    # Search first so options reflect current subset
+    df_base = company_search(df, key_prefix="prop")
 
-    # Progressive dependent options
+    # Progressive dependent options (as before)
     p1, p2, p3 = st.columns([1,1,1])
 
-    # setor -> subsetor -> segmento (options restricted by previous picks)
     with p1:
         opts_prop_setor = unique_non_null(df_base["setor_progest"])
         sel_prop_setor = st.multiselect("Prop. Setor", options=opts_prop_setor, default=[])
@@ -300,8 +314,13 @@ with tab_prop:
     if sel_prop_segmento:
         df_step = df_step[df_step["segmento_progest"].isin(sel_prop_segmento)]
 
+    # Toggle: only TOP ranking companies
+    only_top = st.checkbox("Apenas empresas no ranking TOP", value=False, key="only_top_prop")
+    if only_top:
+        df_step = df_step[df_step["__IN_TOP__"]]
+
     st.markdown("### Results (both namings shown)")
-    unified_results_table(df_step, widget_key="prop")
+    unified_results_table(df_step, total_count=len(df), widget_key="prop")
 
 # ---------------- Notes ----------------
 with st.expander("Notes"):
@@ -309,7 +328,7 @@ with st.expander("Notes"):
         """
 - The dropdowns are **dependent**: once you filter a category, other fields only show non-null options available in the remaining data.
 - **CNAE Primário (descrição)** and **CNAE Secundário (descrição)** are emphasized and applied first.
-- **CNAE secundários** are treated as lists in `cnae_secundarios_norm`/`cnae_secundarios_descricao`; use the ANY/ALL switches to control matching behavior.
+- Rows that belong to the **TOP ranking list** are highlighted in light green; toggle “Apenas empresas no ranking TOP” to restrict results.
 - All text searches are substring-based; dropdowns are exact-match multi-selects.
 """
     )
