@@ -190,11 +190,8 @@ def unified_results_table(df_filtered: pd.DataFrame, *, widget_key: str):
         "input_company","CNPJ_fmt",
         "cnae_descricao",                 # primary description (important)
         "cnae_secundarios_descricao",     # secondary description (important)
-        "cnae_primario",
         "setor","subsetor","segmento",
-        "cnae_secundarios_norm","cnae_secundarios_pairs",
         "setor_progest","subsetor_progest","segmento_progest",
-        "cnae7","source","confidence",
     ]
     present = [c for c in cols_order if c in df_filtered.columns]
     view = df_filtered[present].rename(columns={
@@ -203,17 +200,11 @@ def unified_results_table(df_filtered: pd.DataFrame, *, widget_key: str):
         "setor": "CNAE Setor",
         "subsetor": "CNAE Subsetor",
         "segmento": "CNAE Segmento",
-        "cnae_primario": "CNAE Primário (código)",
         "cnae_descricao": "CNAE Primário (descrição)",
-        "cnae_secundarios_norm": "CNAE Secundários (códigos)",
         "cnae_secundarios_descricao": "CNAE Secundários (descrições)",
-        "cnae_secundarios_pairs": "CNAE Secundários (pares código — descrição)",
         "setor_progest": "Prop. Setor",
         "subsetor_progest": "Prop. Subsetor",
         "segmento_progest": "Prop. Segmento",
-        "cnae7": "CNAE7",
-        "source": "Fonte",
-        "confidence": "Confiança",
     })
 
     # Insert left columns
@@ -375,3 +366,4 @@ with st.expander("Notes"):
 - All text searches are substring-based; dropdowns are exact-match multi-selects.
 """
     )
+
