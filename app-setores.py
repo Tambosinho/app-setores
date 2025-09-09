@@ -23,7 +23,7 @@ REQ_COLS = [
     "source","confidence",
 ]
 
-TOP_RANKING_BASENAME = "top_123_companies_list_DECADE_and_LAST"  # we'll try .xlsx/.xls/.csv
+TOP_RANKING_BASENAME = "top_123_companies_list_DECADE_and_LAST"  # we will try .csv/.xlsx/.xls in this order
 
 # ---------------- Helpers ----------------
 def format_cnpj(raw: str) -> str:
@@ -102,22 +102,37 @@ def load_csv() -> pd.DataFrame:
 def load_top_ranking_set() -> Set[str]:
     """
     Try to load the TOP ranking file from the working directory.
-    Accepts .xlsx, .xls, .csv. Detects the first column whose name contains 'cnpj' (case-insensitive).
+    Tries CSV first (no extra deps), then XLSX/XLS (requires openpyxl for .xlsx).
+    Detects the first column whose name contains 'cnpj' (case-insensitive).
     Returns a set of normalized CNPJs (14-digit strings).
     """
     candidates = [
+        Path(f"{TOP_RANKING_BASENAME}.csv"),
         Path(f"{TOP_RANKING_BASENAME}.xlsx"),
         Path(f"{TOP_RANKING_BASENAME}.xls"),
-        Path(f"{TOP_RANKING_BASENAME}.csv"),
     ]
     path: Optional[Path] = next((p for p in candidates if p.exists()), None)
     if path is None:
         return set()
 
-    if path.suffix.lower() in [".xlsx", ".xls"]:
-        tdf = pd.read_excel(path, dtype="string")
-    else:
-        tdf = pd.read_csv(path, dtype="string")
+    try:
+        if path.suffix.lower() == ".csv":
+            tdf = pd.read_csv(path, dtype="string")
+        elif path.suffix.lower() in [".xlsx", ".xls"]:
+            # openpyxl is required for .xlsx; handle absence gracefully
+            try:
+                tdf = pd.read_excel(path, dtype="string", engine="openpyxl")
+            except ImportError:
+                st.warning(
+                    f"TOP ranking file '{path.name}' requires the 'openpyxl' package. "
+                    f"Install it or provide a CSV with the same basename. Proceeding without TOP list."
+                )
+                return set()
+        else:
+            return set()
+    except Exception as e:
+        st.warning(f"Could not read TOP ranking file '{path.name}': {e}. Proceeding without TOP list.")
+        return set()
 
     # find CNPJ-like column
     cnpj_cols = [c for c in tdf.columns if "cnpj" in c.lower()]
@@ -160,11 +175,11 @@ def unified_results_table(df_filtered: pd.DataFrame, total_count: int, *, widget
     top_label = df_filtered["__IN_TOP__"].map(lambda b: "TOP" if bool(b) else "")
     idx_col = pd.Series(range(1, len(df_filtered) + 1), index=df_filtered.index, dtype="int")
 
-    # Base view (order: TOP, #, Empresa, CNPJ_fmt, descriptions, rest)
+    # Base view (order: TOP, #, Empresa, CNPJ_fmt, descriptions, rest) — no raw cnpj column
     cols_order = [
         "input_company","CNPJ_fmt",
-        "cnae_descricao",  # primary description (important)
-        "cnae_secundarios_descricao",  # secondary description (important)
+        "cnae_descricao",                 # primary description (important)
+        "cnae_secundarios_descricao",     # secondary description (important)
         "cnae_primario",
         "setor","subsetor","segmento",
         "cnae_secundarios_norm","cnae_secundarios_pairs",
@@ -216,6 +231,7 @@ def unified_results_table(df_filtered: pd.DataFrame, total_count: int, *, widget
 df_raw = load_csv()
 top_set = load_top_ranking_set()
 df = add_top_flag(df_raw, top_set)
+total_count_all = len(df)
 
 # ---------------- Tabs ----------------
 tab_cnae, tab_prop = st.tabs(["🏷️ CNAE filters", "🏷️ JP filters (proprietary)"])
@@ -274,13 +290,19 @@ with tab_cnae:
     if sel_setor:
         df_step = df_step[df_step["setor"].isin(sel_setor)]
 
-    # Toggle: only TOP ranking companies
-    only_top = st.checkbox("Apenas empresas no ranking TOP", value=False, key="only_top_cnae")
+    # Toggle: only TOP ranking companies (disabled if no TOP file)
+    only_top = st.checkbox(
+        "Apenas empresas no ranking TOP",
+        value=False,
+        key="only_top_cnae",
+        disabled=(len(top_set) == 0),
+        help=None if len(top_set) > 0 else f"Coloque '{TOP_RANKING_BASENAME}.csv' (ou .xlsx/.xls com openpyxl) na mesma pasta."
+    )
     if only_top:
         df_step = df_step[df_step["__IN_TOP__"]]
 
     st.markdown("### Results (both namings shown)")
-    unified_results_table(df_step, total_count=len(df), widget_key="cnae")
+    unified_results_table(df_step, total_count=total_count_all, widget_key="cnae")
 
 # ====================== JP (PROPRIETARY) TAB ======================
 with tab_prop:
@@ -289,7 +311,7 @@ with tab_prop:
     # Search first so options reflect current subset
     df_base = company_search(df, key_prefix="prop")
 
-    # Progressive dependent options (as before)
+    # Progressive dependent options: setor -> subsetor -> segmento
     p1, p2, p3 = st.columns([1,1,1])
 
     with p1:
@@ -314,21 +336,28 @@ with tab_prop:
     if sel_prop_segmento:
         df_step = df_step[df_step["segmento_progest"].isin(sel_prop_segmento)]
 
-    # Toggle: only TOP ranking companies
-    only_top = st.checkbox("Apenas empresas no ranking TOP", value=False, key="only_top_prop")
+    # Toggle: only TOP ranking companies (disabled if no TOP file)
+    only_top = st.checkbox(
+        "Apenas empresas no ranking TOP",
+        value=False,
+        key="only_top_prop",
+        disabled=(len(top_set) == 0),
+        help=None if len(top_set) > 0 else f"Coloque '{TOP_RANKING_BASENAME}.csv' (ou .xlsx/.xls com openpyxl) na mesma pasta."
+    )
     if only_top:
         df_step = df_step[df_step["__IN_TOP__"]]
 
     st.markdown("### Results (both namings shown)")
-    unified_results_table(df_step, total_count=len(df), widget_key="prop")
+    unified_results_table(df_step, total_count=total_count_all, widget_key="prop")
 
 # ---------------- Notes ----------------
 with st.expander("Notes"):
     st.markdown(
-        """
+        f"""
 - The dropdowns are **dependent**: once you filter a category, other fields only show non-null options available in the remaining data.
 - **CNAE Primário (descrição)** and **CNAE Secundário (descrição)** are emphasized and applied first.
 - Rows that belong to the **TOP ranking list** are highlighted in light green; toggle “Apenas empresas no ranking TOP” to restrict results.
+- To enable TOP ranking reading from Excel, install **openpyxl** or provide a **CSV** named **{TOP_RANKING_BASENAME}.csv** in the working directory.
 - All text searches are substring-based; dropdowns are exact-match multi-selects.
 """
     )
