@@ -355,15 +355,5 @@ with tab_prop:
     st.markdown("### Results (both namings shown)")
     unified_results_table(df_step, widget_key="prop")
 
-# ---------------- Notes ----------------
-with st.expander("Notes"):
-    st.markdown(
-        f"""
-- The dropdowns are **dependent**: once you filter a category, other fields only show non-null options available in the remaining data.
-- **CNAE Primário (descrição)** and **CNAE Secundário (descrição)** are emphasized and applied first.
-- Rows that belong to the **TOP ranking list** are highlighted in light green; toggle “Apenas empresas no ranking TOP” to restrict results.
-- To enable TOP ranking reading from Excel, install **openpyxl** or provide a **CSV** named **{TOP_RANKING_BASENAME}.csv** in the working directory.
-- All text searches are substring-based; dropdowns are exact-match multi-selects.
-"""
-    )
+
 
