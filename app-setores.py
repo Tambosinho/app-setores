@@ -11,6 +11,25 @@ st.set_page_config(page_title="Company Sector Browser", page_icon="📊", layout
 st.title("📊 Company Sector Browser")
 st.caption("Filter by CNAE or by your proprietary 3-level system. Each tab shows a unified table with both namings.")
 
+# --- light UI polish ---
+st.markdown(
+    """
+    <style>
+    /* tighten vertical gaps a bit */
+    .block-container {padding-top: 1.2rem;}
+    div[role="radiogroup"] {gap: .75rem;}
+    /* compact multiselect chips area */
+    div[data-baseweb="select"] > div {min-height: 2.6rem;}
+    /* small metric badge look */
+    .kpi-badge {
+        display:inline-block; padding:.35rem .6rem; border-radius:.75rem;
+        background:#F1F5F9; font-weight:600; font-size:0.95rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ---------------- Constants (fixed columns) ----------------
 REQ_COLS = [
     "cnpj","input_company",
@@ -23,7 +42,7 @@ REQ_COLS = [
     "source","confidence",
 ]
 
-TOP_RANKING_BASENAME = "top_123_companies_list_DECADE_and_LAST"  # we will try .csv/.xlsx/.xls in this order
+TOP_RANKING_BASENAME = "top_123_companies_list_DECADE_and_LAST"  # CSV preferred; XLSX requires openpyxl
 
 # ---------------- Helpers ----------------
 def format_cnpj(raw: str) -> str:
@@ -61,12 +80,8 @@ def split_sec_descriptions(row: pd.Series) -> List[str]:
     out: List[str] = []
     if isinstance(pairs, str) and pairs.strip():
         for it in split_list(pairs):
-            # pairs look like "6499999 — Outras atividades ..."
             parts = [p.strip() for p in it.split("—", 1)]
-            if len(parts) == 2:
-                out.append(parts[1])
-            else:
-                out.append(it.strip())
+            out.append(parts[1] if len(parts) == 2 else it.strip())
     return [x for x in out if x]
 
 def unique_non_null(series: pd.Series) -> list:
@@ -119,7 +134,6 @@ def load_top_ranking_set() -> Set[str]:
         if path.suffix.lower() == ".csv":
             tdf = pd.read_csv(path, dtype="string")
         elif path.suffix.lower() in [".xlsx", ".xls"]:
-            # openpyxl is required for .xlsx; handle absence gracefully
             try:
                 tdf = pd.read_excel(path, dtype="string", engine="openpyxl")
             except ImportError:
@@ -134,7 +148,6 @@ def load_top_ranking_set() -> Set[str]:
         st.warning(f"Could not read TOP ranking file '{path.name}': {e}. Proceeding without TOP list.")
         return set()
 
-    # find CNPJ-like column
     cnpj_cols = [c for c in tdf.columns if "cnpj" in c.lower()]
     if not cnpj_cols:
         return set()
@@ -162,20 +175,17 @@ def style_top_rows(view: pd.DataFrame):
         return [color] * len(row)
     return view.style.apply(_row_style, axis=1)
 
-def unified_results_table(df_filtered: pd.DataFrame, total_count: int, *, widget_key: str):
+def unified_results_table(df_filtered: pd.DataFrame, *, widget_key: str):
     """
-    Build the final results view:
-    - Add TOP RANKING and # columns at the left
-    - Emphasize primary & secondary descriptions early
-    - Remove 'cnpj' raw column
-    - Show count "Empresas: X/Y"
-    - Color TOP rows green
+    Final results view:
+    - Columns on the left: TOP RANKING, #, Empresa, CNPJ (formatado), then key descriptions and the rest.
+    - Remove raw cnpj.
+    - Color TOP rows green.
     """
     # Prepare label columns
     top_label = df_filtered["__IN_TOP__"].map(lambda b: "TOP" if bool(b) else "")
     idx_col = pd.Series(range(1, len(df_filtered) + 1), index=df_filtered.index, dtype="int")
 
-    # Base view (order: TOP, #, Empresa, CNPJ_fmt, descriptions, rest) — no raw cnpj column
     cols_order = [
         "input_company","CNPJ_fmt",
         "cnae_descricao",                 # primary description (important)
@@ -210,9 +220,6 @@ def unified_results_table(df_filtered: pd.DataFrame, total_count: int, *, widget
     view.insert(0, "#", idx_col)
     view.insert(0, "TOP RANKING", top_label)
 
-    # KPI count
-    st.markdown(f"**Empresas: {len(view):,}/{total_count:,}**")
-
     # Render with style (highlight TOP)
     styled = style_top_rows(view)
     st.dataframe(styled, use_container_width=True, key=f"df_{widget_key}")
@@ -238,15 +245,14 @@ tab_cnae, tab_prop = st.tabs(["🏷️ CNAE filters", "🏷️ JP filters (propr
 
 # ============================ CNAE TAB ============================
 with tab_cnae:
-    st.subheader("Filter by CNAE")
+    st.header("Filter by CNAE")
 
     # Search first so options reflect current subset
     df_base = company_search(df, key_prefix="cnae")
 
-    # --- Emphasize descriptions first (most important) ---
-    c1, c2 = st.columns([1.2, 1.2])
-    with c1:
-        # Primary description
+    # Row 1 — Primary & Secondary descriptions side by side (most important)
+    r1c1, r1c2 = st.columns([1.2, 1.2])
+    with r1c1:
         opts_primary_desc = unique_non_null(df_base["cnae_descricao"])
         sel_primary_desc = st.multiselect(
             "⭐ CNAE Primário (descrição)",
@@ -258,8 +264,7 @@ with tab_cnae:
     if sel_primary_desc:
         df_step = df_step[df_step["cnae_descricao"].isin(sel_primary_desc)]
 
-    with c2:
-        # Secondary description options depend on primary selection
+    with r1c2:
         all_sec_descs = sorted({d for row in df_step["__sec_desc_list__"] for d in (row or [])})
         sel_sec_desc = st.multiselect(
             "⭐ CNAE Secundário (descrição)",
@@ -267,12 +272,14 @@ with tab_cnae:
             default=[],
             help="Also a key filter."
         )
+        # put the radio right under the multiselect; collapse label to save space
         sec_desc_mode = st.radio(
-            "Secondary (descr.) match",
+            label="Secondary (descr.) match",
             options=["ANY","ALL"],
             index=0,
             horizontal=True,
             key="sec_desc_mode",
+            label_visibility="collapsed",
             help="ANY = at least one selected description appears. ALL = all must appear."
         )
 
@@ -283,41 +290,46 @@ with tab_cnae:
         else:
             df_step = df_step[df_step["__sec_desc_list__"].map(lambda L: set(sel_sec_desc).issubset(set(L)))]
 
-    # CNAE Setor (dependent on previous filters)
-    opts_setor = unique_non_null(df_step["setor"])
-    sel_setor = st.multiselect("CNAE Setor", options=opts_setor, default=[])
-
+    # Row 2 — CNAE Setor (wide) + TOP toggle + KPI on the right
+    r2c1, r2c2, r2c3 = st.columns([2.2, 0.9, 0.9])
+    with r2c1:
+        opts_setor = unique_non_null(df_step["setor"])
+        sel_setor = st.multiselect("CNAE Setor", options=opts_setor, default=[])
     if sel_setor:
         df_step = df_step[df_step["setor"].isin(sel_setor)]
 
-    # Toggle: only TOP ranking companies (disabled if no TOP file)
-    only_top = st.checkbox(
-        "Apenas empresas no ranking TOP",
-        value=False,
-        key="only_top_cnae",
-        disabled=(len(top_set) == 0),
-        help=None if len(top_set) > 0 else f"Coloque '{TOP_RANKING_BASENAME}.csv' (ou .xlsx/.xls com openpyxl) na mesma pasta."
-    )
-    if only_top:
-        df_step = df_step[df_step["__IN_TOP__"]]
+    with r2c2:
+        only_top = st.checkbox(
+            "Apenas empresas no ranking TOP",
+            value=False,
+            key="only_top_cnae",
+            disabled=(len(top_set) == 0),
+            help=None if len(top_set) > 0 else f"Coloque '{TOP_RANKING_BASENAME}.csv' (ou .xlsx/.xls com openpyxl) na mesma pasta."
+        )
+        if only_top:
+            df_step = df_step[df_step["__IN_TOP__"]]
+
+    with r2c3:
+        st.markdown(
+            f"<div class='kpi-badge'>Empresas: {len(df_step):,}/{total_count_all:,}</div>",
+            unsafe_allow_html=True,
+        )
 
     st.markdown("### Results (both namings shown)")
-    unified_results_table(df_step, total_count=total_count_all, widget_key="cnae")
+    unified_results_table(df_step, widget_key="cnae")
 
 # ====================== JP (PROPRIETARY) TAB ======================
 with tab_prop:
-    st.subheader("JP filters (proprietary)")
+    st.header("JP filters (proprietary)")
 
     # Search first so options reflect current subset
     df_base = company_search(df, key_prefix="prop")
 
-    # Progressive dependent options: setor -> subsetor -> segmento
-    p1, p2, p3 = st.columns([1,1,1])
-
+    # Row 1 — 3 dependent selects
+    p1, p2, p3, p4 = st.columns([1,1,1,0.9])
     with p1:
         opts_prop_setor = unique_non_null(df_base["setor_progest"])
         sel_prop_setor = st.multiselect("Prop. Setor", options=opts_prop_setor, default=[])
-
     df_step = df_base
     if sel_prop_setor:
         df_step = df_step[df_step["setor_progest"].isin(sel_prop_setor)]
@@ -325,30 +337,32 @@ with tab_prop:
     with p2:
         opts_prop_subsetor = unique_non_null(df_step["subsetor_progest"])
         sel_prop_subsetor = st.multiselect("Prop. Subsetor", options=opts_prop_subsetor, default=[])
-
     if sel_prop_subsetor:
         df_step = df_step[df_step["subsetor_progest"].isin(sel_prop_subsetor)]
 
     with p3:
         opts_prop_segmento = unique_non_null(df_step["segmento_progest"])
         sel_prop_segmento = st.multiselect("Prop. Segmento", options=opts_prop_segmento, default=[])
-
     if sel_prop_segmento:
         df_step = df_step[df_step["segmento_progest"].isin(sel_prop_segmento)]
 
-    # Toggle: only TOP ranking companies (disabled if no TOP file)
-    only_top = st.checkbox(
-        "Apenas empresas no ranking TOP",
-        value=False,
-        key="only_top_prop",
-        disabled=(len(top_set) == 0),
-        help=None if len(top_set) > 0 else f"Coloque '{TOP_RANKING_BASENAME}.csv' (ou .xlsx/.xls com openpyxl) na mesma pasta."
-    )
-    if only_top:
-        df_step = df_step[df_step["__IN_TOP__"]]
+    with p4:
+        only_top = st.checkbox(
+            "Apenas empresas no ranking TOP",
+            value=False,
+            key="only_top_prop",
+            disabled=(len(top_set) == 0),
+            help=None if len(top_set) > 0 else f"Coloque '{TOP_RANKING_BASENAME}.csv' (ou .xlsx/.xls com openpyxl) na mesma pasta."
+        )
+        if only_top:
+            df_step = df_step[df_step["__IN_TOP__"]]
+        st.markdown(
+            f"<div class='kpi-badge' style='margin-top:.5rem;'>Empresas: {len(df_step):,}/{total_count_all:,}</div>",
+            unsafe_allow_html=True,
+        )
 
     st.markdown("### Results (both namings shown)")
-    unified_results_table(df_step, total_count=total_count_all, widget_key="prop")
+    unified_results_table(df_step, widget_key="prop")
 
 # ---------------- Notes ----------------
 with st.expander("Notes"):
