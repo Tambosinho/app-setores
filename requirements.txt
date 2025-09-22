@@ -1,3 +1,15 @@
+# core app
 streamlit>=1.36
 pandas>=2.2
 openpyxl>=3.1
+altair>=5.3
+plotly>=5.22
+
+# mapping stack (needed for the Brazil regions choropleth)
+geopandas>=0.14
+geobr>=0.2.1
+shapely>=2.0
+pyproj>=3.6
+
+# common deps (explicit to avoid env drift)
+numpy>=1.26
